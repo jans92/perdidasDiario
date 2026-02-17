@@ -13,6 +13,8 @@ venv/
 # Sistema
 .DS_Store
 *.lock
+*.pkl
+*.txt
 
 # Archivos temporales de test
 test_predictions_*.csv
