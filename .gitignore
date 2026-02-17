@@ -1,5 +1,4 @@
 # Archivos sensibles
-config.yaml
 *.log
 *.csv
 
