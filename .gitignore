@@ -1,0 +1,19 @@
+# Archivos sensibles
+config.yaml
+*.log
+*.csv
+
+# Python
+__pycache__/
+*.pyc
+.conda/
+venv/
+.env
+.venv/
+# Sistema
+.DS_Store
+*.lock
+logs
+# Archivos temporales de test
+test_predictions_*.csv
+test_inference.log

@@ -1,0 +1,64 @@
+{
+  "version": "1.0",
+  "fecha_generacion": "2026-01-05T14:10:40.138324",
+  "modelo": {
+    "algoritmo": "LightGBM",
+    "archivo": "model_optimized.txt",
+    "best_iteration": 25,
+    "n_features": 48
+  },
+  "features": {
+    "archivo": "features_utiles.json",
+    "n_features": 48
+  },
+  "preprocessing": {
+    "archivo": "preprocessing_artifacts.pkl",
+    "descripcion": "Encoders, thresholds y estadísticas para preprocesamiento"
+  },
+  "umbrales": {
+    "default": 0.5,
+    "produccion": 0.3724709494525155,
+    "optimo_test": 0.3724709494525155,
+    "alertas": {
+      "critical": 0.6,
+      "moderate": 0.31,
+      "low": 0.1
+    }
+  },
+  "metricas_referencia": {
+    "auc_roc": 0.8067292888219246,
+    "precision": 0.75,
+    "recall": 0.8,
+    "f1": 0.77,
+    "avg_precision": 0.72
+  },
+  "pipeline_config": {
+    "horizonte_prediccion_horas": 24,
+    "ventana_24h": 24,
+    "ventana_7d": 168,
+    "ventana_30d": 720,
+    "rolling_windows": [
+      2,
+      6,
+      12,
+      24
+    ]
+  },
+  "hiperparametros": {
+    "learning_rate": 0.025523407271134325,
+    "num_leaves": 43,
+    "max_depth": 10,
+    "min_child_samples": 66
+  },
+  "fechas_entrenamiento": {
+    "inicio_historico": "2025-07-01",
+    "fecha_fin_train": "2025-09-30 23:59:59",
+    "fecha_fin_test": "2025-11-30 23:59:59"
+  },
+  "acciones_recomendadas": {
+    "CRITICAL": "Mantenimiento INMEDIATO - Coordinar con producción",
+    "MODERATE": "Inspección PRIORITARIA en 24h",
+    "LOW": "Monitoreo INTENSIVO - Verificar en próximo turno",
+    "NONE": "Operación NORMAL - Mantenimiento según plan"
+  }
+}
