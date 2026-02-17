@@ -1,49 +1,42 @@
 """
-Cargador de configuración con soporte para variables de entorno
+config_loader.py - Carga de configuración desde YAML con interpolación de entorno.
+Soporta la sintaxis ${VAR_NAME} para inyectar variables de entorno en el YAML.
 """
+
 import os
-import yaml
 import re
+import yaml
 from pathlib import Path
 from dotenv import load_dotenv
 
+
 def load_config(config_path: str = "config.yaml") -> dict:
     """
-    Carga configuración desde YAML y reemplaza variables de entorno.
-    
-    Soporta sintaxis ${VAR_NAME} en el YAML.
+    Lee el YAML, resuelve ${VAR_NAME} con variables de entorno y retorna el dict.
+    Falla explícitamente si alguna variable referenciada no está definida.
     """
-    # Cargar .env si existe
-    env_path = Path(config_path).parent / ".env"
-    if env_path.exists():
-        load_dotenv(env_path)
-    
-    # Leer YAML
-    with open(config_path, 'r') as f:
-        config_text = f.read()
-    
-    # Reemplazar ${VAR_NAME} con valores de entorno
-    pattern = re.compile(r'\$\{([^}]+)\}')
-    
-    def replace_env_var(match):
-        var_name = match.group(1)
-        value = os.environ.get(var_name)
-        if value is None:
-            raise ValueError(f"Variable de entorno no definida: {var_name}")
-        return value
-    
-    config_text = pattern.sub(replace_env_var, config_text)
-    
-    # Parsear YAML
-    config = yaml.safe_load(config_text)
-    
-    return config
+    rutaConfig = Path(config_path)
+    rutaEnv    = rutaConfig.parent / ".env"
+    if rutaEnv.exists():
+        load_dotenv(rutaEnv)
+
+    with open(rutaConfig, 'r') as f:
+        textoConfig = f.read()
+
+    def _resolverVar(match):
+        nombre = match.group(1)
+        valor  = os.environ.get(nombre)
+        if valor is None:
+            raise ValueError(f"Variable de entorno no definida: {nombre}")
+        return valor
+
+    textoConfig = re.compile(r'\$\{([^}]+)\}').sub(_resolverVar, textoConfig)
+    return yaml.safe_load(textoConfig)
 
 
-# Uso simple
 if __name__ == "__main__":
     config = load_config()
-    print(" Configuración cargada")
-    print(f"   DB Host: {config['database']['host']}")
-    print(f"   DB User: {config['database']['user']}")
-    print(f"   DB Pass: {'*' * len(config['database']['password'])}")  # No mostrar
+    print("Configuración cargada")
+    print(f"  host : {config['database']['host']}")
+    print(f"  user : {config['database']['user']}")
+    print(f"  pass : {'*' * len(config['database']['password'])}")

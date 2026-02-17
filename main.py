@@ -1,16 +1,25 @@
 """
-main.py - Sistema de Mantenimiento Predictivo
-==============================================
-
-Orquestador principal del sistema de predicción.
-Configurado para procesar exclusivamente la fábrica de Veszprém.
-
-Se ejecuta 1 vez al día a las 6:00 AM.
-Genera predicciones para el próximo día completo (24 horas).
+main.py - Orquestador del sistema de mantenimiento predictivo.
+Fábrica: Veszprém (id_fabrica=21). Ejecución diaria a las 6:00 AM.
+Genera predicciones hora a hora para las próximas 24h.
 """
 
 import sys
 import os
+import signal
+import tempfile
+import logging
+import warnings
+
+import yaml
+import pandas as pd
+from pandas.errors import PerformanceWarning
+from datetime import datetime, timedelta
+from pathlib import Path
+from dotenv import load_dotenv
+
+warnings.simplefilter(action='ignore', category=PerformanceWarning)
+warnings.simplefilter(action='ignore', category=FutureWarning)
 
 if sys.platform == 'win32':
     try:
@@ -22,243 +31,203 @@ if sys.platform == 'win32':
             sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
             sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
     except Exception as e:
-        print(f"Advertencia: No se pudo configurar UTF-8: {e}")
-
-import logging
-import yaml
-import signal
-import tempfile
-import warnings
-import pandas as pd
-from pandas.errors import PerformanceWarning
-from save_predictions import save_predictions_to_db
-from datetime import datetime, timedelta
-from pathlib import Path
-from dotenv import load_dotenv
-
-warnings.simplefilter(action='ignore', category=PerformanceWarning)
-warnings.simplefilter(action='ignore', category=FutureWarning)
-
-load_dotenv('.env')
+        print(f"Advertencia: no se pudo configurar UTF-8: {e}")
 
 try:
     import fcntl
 except ImportError:
     fcntl = None
 
-BASE_DIR = Path(__file__).parent
-sys.path.insert(0, str(BASE_DIR))
+load_dotenv('.env')
+
+dirBase = Path(__file__).parent
+sys.path.insert(0, str(dirBase))
 
 from src.db_connector import DatabaseConnector
 from src.feature_engineering import FeatureEngineer
 from src.predictor import Predictor
 from src.utils import setup_logging, send_email_alert
 from src.config_loader import load_config
+from save_predictions import guardarPrediccionesEnBd
 
 
-def setup_timeout(timeout_minutes):
-    """Configura timeout para evitar ejecuciones infinitas (Solo Unix)."""
+ID_FABRICA_VESZPREM = 21
+
+
+def configurarTimeout(minutos):
+    # TIMEOUT - solo sistemas UNIX
     if not hasattr(signal, 'SIGALRM'):
-        logging.warning("[TIMEOUT] No soportado en Windows. Se omitirá el límite de tiempo.")
+        logging.warning("[TIMEOUT] No disponible en Windows")
         return
 
-    def timeout_handler(signum, frame):
-        raise TimeoutError(f"Ejecución superó {timeout_minutes} minutos")
+    def _manejador(signum, frame):
+        raise TimeoutError(f"Ejecución superó {minutos} minutos")
 
-    signal.signal(signal.SIGALRM, timeout_handler)
-    signal.alarm(timeout_minutes * 60)
+    signal.signal(signal.SIGALRM, _manejador)
+    signal.alarm(minutos * 60)
 
 
-def acquire_lock():
-    """Adquiere lock para evitar ejecuciones simultáneas."""
-    lockfile_path = os.path.join(tempfile.gettempdir(), 'predictive_maintenance.lock')
-    lockfile = open(lockfile_path, 'w')
+def adquirirBloqueo():
+    # BLOQUEO DE PROCESO - evita ejecuciones simultáneas
+    rutaLock = os.path.join(tempfile.gettempdir(), 'predictive_maintenance.lock')
+    archivoLock = open(rutaLock, 'w')
 
     if fcntl is None:
-        logging.warning("[LOCK] No soportado en Windows. Se ejecutará sin exclusión mutua.")
-        return lockfile
+        logging.warning("[LOCK] No disponible en Windows")
+        return archivoLock
 
     try:
-        fcntl.flock(lockfile, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return lockfile
+        fcntl.flock(archivoLock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return archivoLock
     except IOError:
-        logging.error("[LOCK] Otra instancia está corriendo. Saliendo...")
+        logging.error("[LOCK] Otra instancia ya en ejecución")
         sys.exit(0)
 
 
-def release_lock(lockfile):
-    """Libera el lock de forma segura."""
-    if lockfile and not lockfile.closed:
+def liberarBloqueo(archivoLock):
+    if archivoLock and not archivoLock.closed:
         if fcntl:
-            fcntl.flock(lockfile, fcntl.LOCK_UN)
-        lockfile.close()
+            fcntl.flock(archivoLock, fcntl.LOCK_UN)
+        archivoLock.close()
 
 
-def generar_predicciones_dia_completo(predictor, feature_engineer, 
-                                      bui_perdida, bui_pm_ewo, bui_line,
-                                      fecha_inicio, logger):
-    """
-    Genera predicciones para todas las horas del día (00:00 a 23:00).
-    """
-    logger.info(f"\nGenerando predicciones para día completo: {fecha_inicio.date()}")
-    
-    todas_predicciones = []
-    horas_sin_datos = 0
-    horas_error = 0
-    
-    # PASO CRÍTICO: Feature Engineering SOLO UNA VEZ
-    logger.info("[PRE-CÁLCULO] Matriz de características (datos históricos)...")
+def generarPrediccionesDia(predictor, ingCaracteristicas, buiPerdida, buiPmEwo,
+                            buiLine, fechaBase, logger):
+    # PREDICCIÓN 24H - genera una fila por máquina para cada hora del día siguiente
+    logger.info(f"\n[PASO 4] Generando predicciones: {fechaBase.date()}")
+
+    logger.info("  Calculando matriz de características...")
     try:
-        X = feature_engineer.transform(bui_perdida, bui_pm_ewo, bui_line)
-        logger.info(f"   Matriz X: {X.shape} ({X['id_maquina_dfos'].nunique()} máquinas)")
+        X = ingCaracteristicas.transform(buiPerdida, buiPmEwo, buiLine)
+        logger.info(f"  Matriz X: {X.shape} | {X['id_maquina_dfos'].nunique()} máquinas")
     except Exception as e:
-        logger.error(f"   Error en feature engineering: {e}", exc_info=True)
+        logger.error(f"  Error en feature engineering: {e}", exc_info=True)
         return pd.DataFrame()
-    
-    if len(X) == 0:
-        logger.error("   Feature engineering devolvió matriz vacía")
+
+    if X.empty:
+        logger.error("  Matriz de características vacía")
         return pd.DataFrame()
-    
-    # BUCLE: 24 horas
-    for hora_offset in range(1, 25):
-        ventana_actual = fecha_inicio + timedelta(hours=hora_offset)
-        
+
+    acumulado = []
+    horasSinDatos = 0
+    horasConError = 0
+
+    for offsetHora in range(1, 25):
+        ventana = fechaBase + timedelta(hours=offsetHora)
         try:
-            predictions = predictor.predict(X)
-            
-            if len(predictions) == 0:
-                horas_sin_datos += 1
+            predicciones = predictor.predict(X)
+            if predicciones.empty:
+                horasSinDatos += 1
                 continue
-            
-            # Asignar el timestamp específico de la ventana
-            predictions['timestamp_ventana'] = ventana_actual
-            todas_predicciones.append(predictions)
-        
+            predicciones['timestamp_ventana'] = ventana
+            acumulado.append(predicciones)
         except Exception as e:
-            logger.error(f"     Error prediciendo hora {hora_offset}: {e}")
-            horas_error += 1
-            continue
-    
-    if not todas_predicciones:
-        logger.error(f" No se generaron predicciones")
+            logger.error(f"  Error hora +{offsetHora}h: {e}")
+            horasConError += 1
+
+    if horasSinDatos:
+        logger.warning(f"  Horas sin datos: {horasSinDatos}/24")
+    if horasConError:
+        logger.warning(f"  Horas con error: {horasConError}/24")
+
+    if not acumulado:
+        logger.error("  No se generó ninguna predicción")
         return pd.DataFrame()
-    
-    predictions_df = pd.concat(todas_predicciones, ignore_index=True)
-    return predictions_df
+
+    return pd.concat(acumulado, ignore_index=True)
 
 
 def main():
-    """Función principal de ejecución."""
-    
     try:
-        config = load_config(str(BASE_DIR / 'config.yaml'))
+        config = load_config(str(dirBase / 'config.yaml'))
     except Exception as e:
-        print(f"[ERROR] Error crítico cargando config: {e}")
+        print(f"[ERROR] No se pudo cargar config.yaml: {e}")
         sys.exit(1)
-    
+
     logger = setup_logging(config)
-    
-    logger.info("=" * 80)
-    logger.info("[INICIO] Mantenimiento Predictivo - Fábrica VESZPRÉM")
-    logger.info("=" * 80)
-    
-    lockfile = acquire_lock()
-    timeout_minutes = config.get('execution', {}).get('timeout_minutes', 120)
-    setup_timeout(timeout_minutes)
-    
-    db = None
-    
+    logger.info("=" * 70)
+    logger.info("[INICIO] Mantenimiento Predictivo — Fábrica VESZPRÉM")
+    logger.info("=" * 70)
+
+    archivoLock = adquirirBloqueo()
+    minutosTimeout = config.get('execution', {}).get('timeout_minutes', 120)
+    configurarTimeout(minutosTimeout)
+
+    bd = None
     try:
-        # =====================================================================
-        # PASO 1: EXTRAER DATOS
-        # =====================================================================
-        db = DatabaseConnector(config)
-        db.connect_source()
-        
-        lookback_hours = config.get('execution', {}).get('lookback_hours', 168)
-        lookback_days_maintenance = config.get('execution', {}).get('lookback_days_maintenance', 60)
-        fecha_referencia = config.get('execution', {}).get('fecha_referencia', None)
-        fecha_hoy = pd.to_datetime(fecha_referencia).date() if fecha_referencia else datetime.now().date()
-        
-        # Extracción inicial
-        bui_perdida = db.extract_events_data(lookback_hours=lookback_hours, fecha_referencia=fecha_referencia)
-        bui_pm_ewo = db.extract_maintenance_data(lookback_days=lookback_days_maintenance, fecha_referencia=fecha_referencia)
-        bui_line = db.extract_line_metadata()
+        # PASO 1: EXTRACCIÓN DE DATOS
+        bd = DatabaseConnector(config)
+        bd.connect_source()
 
-        # ---------------------------------------------------------------------
-        # NUEVO: FILTRO OBLIGATORIO - SOLO VESZPRÉM
-        # ---------------------------------------------------------------------
-        logger.info("\n[FILTRO] Aplicando filtro de fábrica: Veszprém")
-        bui_line = bui_line[bui_line['id_fabrica'] == 21].copy()
-        
-        if bui_line.empty:
-            logger.error("No se encontraron líneas activas para 'Veszprém'. Abortando.")
+        ejec = config.get('execution', {})
+        horasHistorial     = ejec.get('lookback_hours', 168)
+        diasMantenimiento  = ejec.get('lookback_days_maintenance', 60)
+        fechaRef           = ejec.get('fecha_referencia', None)
+        fechaHoy           = pd.to_datetime(fechaRef).date() if fechaRef else datetime.now().date()
+
+        buiPerdida = bd.extract_events_data(lookback_hours=horasHistorial, fecha_referencia=fechaRef)
+        buiPmEwo   = bd.extract_maintenance_data(lookback_days=diasMantenimiento, fecha_referencia=fechaRef)
+        buiLine    = bd.extract_line_metadata()
+
+        # FILTRO VESZPRÉM - solo líneas de la fábrica objetivo
+        buiLine = buiLine[buiLine['id_fabrica'] == ID_FABRICA_VESZPREM].copy()
+        if buiLine.empty:
+            logger.error("[FILTRO] Sin líneas activas para Veszprém")
             return 0
-            
-        veszprem_line_ids = bui_line['id_linea'].unique().tolist()
-        logger.info(f" - Líneas detectadas: {len(veszprem_line_ids)} {veszprem_line_ids}")
-        
-        # Filtrar el resto de DataFrames por los IDs de línea de Veszprém
-        bui_perdida = bui_perdida[bui_perdida['id_linea'].isin(veszprem_line_ids)].copy()
-        bui_pm_ewo = bui_pm_ewo[bui_pm_ewo['id_linea'].isin(veszprem_line_ids)].copy()
-        # ---------------------------------------------------------------------
 
-        if bui_perdida.empty:
-            logger.warning("[SIN DATOS] No hay eventos de producción para Veszprém en el período.")
+        idsLineas = buiLine['id_linea'].unique().tolist()
+        logger.info(f"[FILTRO] {len(idsLineas)} líneas activas: {idsLineas}")
+
+        buiPerdida = buiPerdida[buiPerdida['id_linea'].isin(idsLineas)].copy()
+        buiPmEwo   = buiPmEwo[buiPmEwo['id_linea'].isin(idsLineas)].copy()
+
+        if buiPerdida.empty:
+            logger.warning("[DATOS] Sin eventos de pérdida para Veszprém")
             return 0
-        
-        logger.info(f"[INFO] Procesando {bui_perdida['id_maquina_dfos'].nunique()} máquinas de Veszprém")
 
-        # =====================================================================
+        logger.info(f"[DATOS] {buiPerdida['id_maquina_dfos'].nunique()} máquinas con eventos")
+
         # PASO 2: FEATURE ENGINEERING
-        # =====================================================================
-        logger.info("\n[PASO 2] Feature Engineering...")
-        fe = FeatureEngineer(config)
-        X = fe.transform(bui_perdida, bui_pm_ewo, bui_line)
-        
-        # =====================================================================
-        # PASO 3: PREDICCIÓN
-        # =====================================================================
-        logger.info("\n[PASO 3] Cargando Predictor...")
+        logger.info("\n[PASO 2] Feature engineering...")
+        ingCaracteristicas = FeatureEngineer(config)
+        ingCaracteristicas.transform(buiPerdida, buiPmEwo, buiLine)
+
+        # PASO 3: CARGA DEL PREDICTOR
+        logger.info("\n[PASO 3] Cargando modelo predictor...")
         predictor = Predictor(config)
-        
-        # =====================================================================
-        # PASO 4: GENERACIÓN DÍA COMPLETO
-        # =====================================================================
-        logger.info("\n[PASO 4] Generando ventana de 24 horas...")
-        fecha_predicciones = datetime.combine(fecha_hoy, datetime.min.time())
-        
-        predictions_df = generar_predicciones_dia_completo(
-            predictor, fe, bui_perdida, bui_pm_ewo, bui_line,
-            fecha_predicciones, logger
+
+        # PASO 4: PREDICCIONES 24H
+        fechaBase = datetime.combine(fechaHoy, datetime.min.time())
+        dfPredicciones = generarPrediccionesDia(
+            predictor, ingCaracteristicas,
+            buiPerdida, buiPmEwo, buiLine,
+            fechaBase, logger
         )
-        
-        if predictions_df.empty:
-            logger.error("[ERROR] No se generaron predicciones.")
+
+        if dfPredicciones.empty:
+            logger.error("[ERROR] No se generaron predicciones")
             return 1
-        
-        # =====================================================================
-        # PASO 5: GUARDAR EN BD
-        # =====================================================================
-        logger.info("\n[PASO 5] Guardando en bui_predicciones_hora_dia...")
-        registros_guardados = save_predictions_to_db(predictions_df, config)
-        
-        logger.info(f"\n[ÉXITO] {registros_guardados:,} registros guardados para Veszprém")
+
+        # PASO 5: PERSISTENCIA EN BASE DE DATOS
+        logger.info("\n[PASO 5] Guardando predicciones en BD...")
+        registrosGuardados = guardarPrediccionesEnBd(dfPredicciones, config)
+        logger.info(f"\n[OK] {registrosGuardados:,} registros guardados")
         return 0
-    
+
     except Exception as e:
         logger.error(f"\n[ERROR CRÍTICO] {e}", exc_info=True)
         try:
-            send_email_alert(config, subject="[ERROR] Predicciones Veszprém Fallidas", body=str(e))
-        except: pass
+            send_email_alert(config, subject="[ERROR] Predicciones fallidas", body=str(e))
+        except Exception:
+            pass
         return 1
-    
+
     finally:
-        if db: db.close_connections()
-        release_lock(lockfile)
+        if bd:
+            bd.close_connections()
+        liberarBloqueo(archivoLock)
         logger.info("[FIN] Proceso finalizado")
 
 
 if __name__ == "__main__":
-    exit_code = main()
-    sys.exit(exit_code)
+    sys.exit(main())

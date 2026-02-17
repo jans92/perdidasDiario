@@ -1,149 +1,87 @@
 """
-utils.py
-========
-Funciones auxiliares y utilidades.
+utils.py - Logging, alertas por email y validación de DataFrames.
 """
 
 import logging
-import os
 import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 from datetime import datetime
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from pathlib import Path
 
 
-def setup_logging(config):
+def setup_logging(config: dict) -> logging.Logger:
     """
-    Configura el sistema de logging.
-    
-    Args:
-        config: Diccionario con configuración
-        
-    Returns:
-        Logger configurado
+    Configura logging a consola y/o fichero según config['logging'].
+    Retorna el logger raíz del módulo.
     """
-    log_config = config['logging']
-    
-    # Crear directorio de logs si no existe
-    log_file = None
-    if log_config.get('file', True):
-        log_dir = Path(log_config.get('log_dir', './logs'))
-        log_dir.mkdir(exist_ok=True)
-        
-        # Nombre de archivo con fecha
-        log_file = log_dir / f"predictions_{datetime.now().strftime('%Y-%m-%d')}.log"
-    
-    # Configurar formato
-    log_format = log_config.get(
-        'format',
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-    
-    # Nivel de logging
-    log_level = getattr(logging, log_config.get('level', 'INFO'))
-    
-    # Configurar handlers
+    logConfig = config['logging']
+
     handlers = []
-    
-    if log_config.get('console', True):
-        console_handler = logging.StreamHandler()
-        console_handler.setFormatter(logging.Formatter(log_format))
-        handlers.append(console_handler)
-    
-    if log_config.get('file', True) and log_file:
-        file_handler = logging.FileHandler(
-            log_file,
-            encoding='utf-8',
-            errors='replace'  # Ignora caracteres que no se puedan codificar
-        )
-        file_handler.setFormatter(logging.Formatter(log_format))
-        handlers.append(file_handler)
-    
-    # Configurar logging
+
+    if logConfig.get('console', True):
+        ch = logging.StreamHandler()
+        ch.setFormatter(logging.Formatter(logConfig.get(
+            'format', '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )))
+        handlers.append(ch)
+
+    if logConfig.get('file', True):
+        dirLogs = Path(logConfig.get('log_dir', './logs'))
+        dirLogs.mkdir(exist_ok=True)
+        rutaLog = dirLogs / f"predictions_{datetime.now().strftime('%Y-%m-%d')}.log"
+        fh = logging.FileHandler(rutaLog, encoding='utf-8', errors='replace')
+        fh.setFormatter(logging.Formatter(logConfig.get(
+            'format', '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )))
+        handlers.append(fh)
+
     logging.basicConfig(
-        level=log_level,
-        format=log_format,
+        level=getattr(logging, logConfig.get('level', 'INFO')),
         handlers=handlers,
-        force=True  # Fuerza reconfiguración si ya existe
+        force=True
     )
-    
+
     logger = logging.getLogger(__name__)
-    logger.info(f"Logging configurado: nivel={log_config.get('level')}")
-    
+    logger.info(f"Logging configurado: nivel={logConfig.get('level')}")
     return logger
 
 
-def send_email_alert(config, subject=None, body=None, message=None):
+def send_email_alert(config: dict, subject: str = None, body: str = None) -> None:
     """
-    Envía email de alerta en caso de error.
-    
-    Args:
-        config: Diccionario con configuración
-        subject: Asunto del email (opcional)
-        body: Cuerpo del email (opcional)
-        message: Mensaje de error (compatibilidad con versión anterior)
+    Envía un email de alerta si notifications.email_on_error está activo.
+    No lanza excepción si el envío falla — solo lo registra en el log.
     """
-    notif_config = config.get('notifications', {})
-    
-    if not notif_config.get('email_on_error', False):
+    notif = config.get('notifications', {})
+    if not notif.get('email_on_error', False):
         return
-    
-    # Si se pasó 'message' por compatibilidad, usarlo como body
-    if message and not body:
-        body = message
-    
+
+    msg             = MIMEMultipart()
+    msg['From']     = notif['smtp_user']
+    msg['To']       = notif['email_to']
+    msg['Subject']  = subject or f"ALERTA — Sistema Predictivo — {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    msg.attach(MIMEText(
+        body or f"Error en el sistema de mantenimiento predictivo.\n"
+                f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"Revisar logs para más detalles.",
+        'plain'
+    ))
+
     try:
-        # Configurar email
-        msg = MIMEMultipart()
-        msg['From'] = notif_config['smtp_user']
-        msg['To'] = notif_config['email_to']
-        
-        # Subject por defecto
-        if not subject:
-            subject = f"ALERTA - Sistema Predictivo - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-        msg['Subject'] = subject
-        
-        # Body por defecto
-        if not body:
-            body = f"""
-Ha ocurrido un error en el sistema de mantenimiento predictivo.
-
-Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
-Por favor, revisar los logs para más detalles.
-            """
-        
-        msg.attach(MIMEText(body, 'plain'))
-        
-        # Enviar email
-        server = smtplib.SMTP(notif_config['smtp_host'], notif_config['smtp_port'])
-        server.starttls()
-        server.login(notif_config['smtp_user'], notif_config['smtp_password'])
-        server.send_message(msg)
-        server.quit()
-        
+        srv = smtplib.SMTP(notif['smtp_host'], notif['smtp_port'])
+        srv.starttls()
+        srv.login(notif['smtp_user'], notif['smtp_password'])
+        srv.send_message(msg)
+        srv.quit()
         logging.info("Email de alerta enviado")
-        
     except Exception as e:
-        logging.error(f"Error al enviar email: {e}")
+        logging.error(f"Error enviando email de alerta: {e}")
 
 
-def validate_dataframe(df, required_columns):
-    """
-    Valida que un DataFrame tenga las columnas requeridas.
-    
-    Args:
-        df: DataFrame a validar
-        required_columns: Lista de columnas requeridas
-        
-    Returns:
-        True si válido, False en caso contrario
-    """
-    missing_cols = set(required_columns) - set(df.columns)
-    
-    if missing_cols:
-        logging.error(f"Columnas faltantes: {missing_cols}")
+def validarDataFrame(df, columnasRequeridas: list) -> bool:
+    """Retorna True si df contiene todas las columnas requeridas, False si falta alguna."""
+    faltantes = set(columnasRequeridas) - set(df.columns)
+    if faltantes:
+        logging.error(f"Columnas faltantes en DataFrame: {faltantes}")
         return False
-    
     return True

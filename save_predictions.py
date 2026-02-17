@@ -1,426 +1,261 @@
 """
-save_predictions.py
-====================
-Guarda las predicciones generadas por main.py en la tabla bui_predicciones_hora_dia.
-Se ejecuta inmediatamente después de main.py.
-
-Uso:
-    # Opción 1: Importar como módulo
-    from save_predictions import save_predictions_to_db
-    save_predictions_to_db(predictions_df, config)
-    
-    # Opción 2: Ejecutar standalone (lee predictions del CSV temporal)
-    python save_predictions.py
+save_predictions.py - Persistencia de predicciones en BD.
+Escribe en bui_predicciones_hora_dia usando INSERT IGNORE para tolerar duplicados.
+Uso como módulo: from save_predictions import guardarPrediccionesEnBd
 """
 
 import sys
 import os
 import logging
+
 import yaml
 import pandas as pd
-from datetime import datetime
 from pathlib import Path
 from sqlalchemy import create_engine, text
 
-# Agregar path del proyecto
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
 from src.utils import setup_logging
 
 log = logging.getLogger(__name__)
 
-# ============================================================================
-# CONFIGURACIÓN DE UMBRALES
-# ============================================================================
-
-UMBRAL_PRED_MODELO = 0.3724709494525155  # score >= 0.37 → fl_pred_modelo = 1
-UMBRALES_NIVEL = {
-    'critico': 0.60,
-    'moderado': 0.37,
-    'bajo': 0.15
-}
+# UMBRALES DE CLASIFICACIÓN DE RIESGO
+UMBRAL_MODELO   = 0.3724709494525155
+UMBRALES_NIVEL  = {'critico': 0.60, 'moderado': 0.37, 'bajo': 0.15}
+TABLA_DESTINO   = 'bui_predicciones_hora_dia'
+CHUNK_INSERCION = 1000
 
 
-# ============================================================================
-# FUNCIONES PRINCIPALES
-# ============================================================================
-
-def load_config():
-    """Carga configuración desde config.yaml"""
-    config_path = Path(__file__).parent / 'config.yaml'
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-    return config
+def _cargarConfig():
+    rutaConfig = Path(__file__).parent / 'config.yaml'
+    with open(rutaConfig, 'r') as f:
+        return yaml.safe_load(f)
 
 
-def get_db_engine(config):
-    """Crea conexión a la base de datos"""
-    
-    # DETECTAR ESTRUCTURA DE CONFIGURACIÓN
-    # Si existe 'target' dentro de 'database', usamos esa (estructura nueva)
-    if 'target' in config['database']:
-        db_config = config['database']['target']
-        # Mapeamos nombres si es necesario (database -> bbdd)
-        db_name = db_config.get('database', db_config.get('bbdd'))
-    else:
-        # Estructura antigua plana
-        db_config = config['database']
-        db_name = db_config.get('bbdd', db_config.get('database'))
+def _crearEngine(config):
+    # CONEXIÓN BD - compatible con estructura plana y anidada (database.target)
+    dbConfig = config['database'].get('target', config['database'])
+    nombreBd = dbConfig.get('database') or dbConfig.get('bbdd')
 
-    connection_string = (
-        f"mysql+pymysql://{db_config['user']}:{db_config['password']}"
-        f"@{db_config['host']}:{db_config['port']}/{db_name}"
+    cadena = (
+        f"mysql+pymysql://{dbConfig['user']}:{dbConfig['password']}"
+        f"@{dbConfig['host']}:{dbConfig['port']}/{nombreBd}"
     )
-    
-    engine = create_engine(
-        connection_string,
+    return create_engine(
+        cadena,
         connect_args={'ssl': {'fake_flag_to_enable_tls': True}},
         pool_pre_ping=True,
         pool_recycle=3600,
         echo=False
     )
-    
-    return engine
 
 
-def clasificar_nivel_riesgo(score):
-    """
-    Clasifica el score en nivel de riesgo.
-    
-    Args:
-        score: float entre 0 y 1
-        
-    Returns:
-        str: 'critico', 'moderado', 'bajo', o 'normal'
-    """
-    if score >= UMBRALES_NIVEL['critico']:
-        return 'critico'
-    elif score >= UMBRALES_NIVEL['moderado']:
-        return 'moderado'
-    elif score >= UMBRALES_NIVEL['bajo']:
-        return 'bajo'
-    else:
-        return 'normal'
+def _clasificarNivelRiesgo(score):
+    if score >= UMBRALES_NIVEL['critico']:  return 'critico'
+    if score >= UMBRALES_NIVEL['moderado']: return 'moderado'
+    if score >= UMBRALES_NIVEL['bajo']:     return 'bajo'
+    return 'normal'
 
 
-def preparar_predicciones(predictions_df, de_modelo_version):
-    """
-    Prepara el DataFrame de predicciones para insertar en BD.
-    """
-    log.info("  Preparando predicciones para inserción...")
-    
-    # ============================================================
-    # CREAR DATAFRAME LIMPIO DESDE CERO
-    # ============================================================
-    # Seleccionar solo columnas necesarias y crear DataFrame nuevo
-    columnas_necesarias = ['id_maquina_dfos', 'id_linea', 'score']
-    
-    # Detectar nombre de columna timestamp
-    col_timestamp = None
-    if 'timestamp_ventana' in predictions_df.columns:
-        col_timestamp = 'timestamp_ventana'
-    elif 'fe_ventana' in predictions_df.columns:
-        col_timestamp = 'fe_ventana'
-    else:
-        raise ValueError("No se encuentra columna de timestamp (timestamp_ventana o fe_ventana)")
-    
-    columnas_necesarias.append(col_timestamp)
-    
-    # Crear DataFrame limpio
-    df = predictions_df[columnas_necesarias].copy()
-    
-    # ELIMINAR DUPLICADOS INMEDIATAMENTE
-    duplicados_antes = len(df)
-    df = df.drop_duplicates(subset=['id_maquina_dfos', col_timestamp], keep='last')
-    duplicados_eliminados = duplicados_antes - len(df)
-    
-    if duplicados_eliminados > 0:
-        log.warning(f"  DUPLICADOS ELIMINADOS: {duplicados_eliminados} registros")
-    
-    # Renombrar timestamp a fe_ventana si es necesario
-    if col_timestamp == 'timestamp_ventana':
-        df = df.rename(columns={'timestamp_ventana': 'fe_ventana'})
-    
-    # Resetear índice para evitar problemas
+def _prepararDataFrame(dfRaw, versionModelo):
+    # NORMALIZACIÓN - unifica nombre de columna de timestamp y elimina duplicados
+    colTimestamp = next(
+        (c for c in ('timestamp_ventana', 'fe_ventana') if c in dfRaw.columns), None
+    )
+    if colTimestamp is None:
+        raise ValueError("No se encontró columna de timestamp (timestamp_ventana / fe_ventana)")
+
+    df = dfRaw[['id_maquina_dfos', 'id_linea', 'score', colTimestamp]].copy()
+
+    nAntes = len(df)
+    df = df.drop_duplicates(subset=['id_maquina_dfos', colTimestamp], keep='last')
+    if (eliminados := nAntes - len(df)):
+        log.warning(f"  Duplicados eliminados: {eliminados}")
+
+    if colTimestamp != 'fe_ventana':
+        df = df.rename(columns={colTimestamp: 'fe_ventana'})
+
     df = df.reset_index(drop=True)
-    
-    # AHORA SÍ convertir a datetime (sin duplicados)
     df['fe_ventana'] = pd.to_datetime(df['fe_ventana'], errors='coerce')
-    
-    # Eliminar filas con fechas inválidas
     df = df.dropna(subset=['fe_ventana'])
-    
-    # ============================================================
-    # CALCULAR CAMPOS DERIVADOS
-    # ============================================================
-    
-    # fl_pred_modelo (1 si score >= 0.31)
-    df['fl_pred_modelo'] = (df['score'] >= UMBRAL_PRED_MODELO).astype(int)
-    
-    # de_nivel_riesgo
-    df['de_nivel_riesgo'] = df['score'].apply(clasificar_nivel_riesgo)
-    
-    # nm_score (redondear a 4 decimales)
-    df['nm_score'] = df['score'].round(4)
-    
-    # de_modelo_version
-    df['de_modelo_version'] = de_modelo_version
-    
-    # ============================================================
-    # SELECCIONAR COLUMNAS FINALES
-    # ============================================================
-    columnas_finales = [
-        'id_maquina_dfos',
-        'id_linea',
-        'fe_ventana',
-        'nm_score',
-        'de_nivel_riesgo',
-        'fl_pred_modelo',
-        'de_modelo_version'
+
+    # CAMPOS DERIVADOS
+    df['fl_pred_modelo']    = (df['score'] >= UMBRAL_MODELO).astype(int)
+    df['de_nivel_riesgo']   = df['score'].apply(_clasificarNivelRiesgo)
+    df['nm_score']          = df['score'].round(4)
+    df['de_modelo_version'] = versionModelo
+
+    columnasFin = [
+        'id_maquina_dfos', 'id_linea', 'fe_ventana',
+        'nm_score', 'de_nivel_riesgo', 'fl_pred_modelo', 'de_modelo_version'
     ]
-    
-    df_final = df[columnas_finales].copy()
-    
-    # VERIFICACIÓN FINAL: No debe haber duplicados
-    duplicados_final = df_final.duplicated(subset=['id_maquina_dfos', 'fe_ventana'], keep=False).sum()
-    if duplicados_final > 0:
-        log.error(f"  CRÍTICO: Aún hay {duplicados_final} duplicados después de limpieza")
-        # Forzar eliminación
-        df_final = df_final.drop_duplicates(subset=['id_maquina_dfos', 'fe_ventana'], keep='last')
-    
-    log.info(f"  Predicciones preparadas: {len(df_final):,} registros")
-    log.info(f"  Máquinas únicas: {df_final['id_maquina_dfos'].nunique()}")
-    log.info(f"  Rango temporal: {df_final['fe_ventana'].min()} a {df_final['fe_ventana'].max()}")
-    
-    return df_final
+    df = df[columnasFin].copy()
+
+    # VERIFICACIÓN FINAL de integridad
+    dupsFin = df.duplicated(subset=['id_maquina_dfos', 'fe_ventana'], keep=False).sum()
+    if dupsFin:
+        log.error(f"  Duplicados residuales tras limpieza: {dupsFin} — forzando eliminación")
+        df = df.drop_duplicates(subset=['id_maquina_dfos', 'fe_ventana'], keep='last')
+
+    log.info(f"  {len(df):,} registros listos | {df['id_maquina_dfos'].nunique()} máquinas "
+             f"| {df['fe_ventana'].min()} → {df['fe_ventana'].max()}")
+    return df
 
 
-def save_predictions_to_db(predictions_df, config, de_modelo_version=None):
+def guardarPrediccionesEnBd(dfPredicciones, config, versionModelo=None):
     """
-    Guarda predicciones en la tabla bui_predicciones_hora_dia.
-    
-    Args:
-        predictions_df: DataFrame con predicciones
-        config: dict con configuración
-        de_modelo_version: str con versión del modelo (opcional, lee de config si no se pasa)
-        
-    Returns:
-        int: número de registros insertados
+    Inserta predicciones en bui_predicciones_hora_dia usando INSERT IGNORE.
+    Retorna el número de filas nuevas insertadas.
     """
-    log.info("=" * 80)
-    log.info(" GUARDANDO PREDICCIONES EN BASE DE DATOS")
-    log.info("=" * 80)
-    
-    if len(predictions_df) == 0:
-        log.warning(" DataFrame vacío, nada que guardar")
+    log.info("=" * 70)
+    log.info("GUARDANDO PREDICCIONES EN BASE DE DATOS")
+    log.info("=" * 70)
+
+    if dfPredicciones.empty:
+        log.warning("DataFrame vacío, nada que guardar")
         return 0
-    
-    # Obtener versión del modelo
-    if de_modelo_version is None:
-        de_modelo_version = config.get('model', {}).get('version', 'v1.0')
-    
-    # Preparar datos
-    df_insert = preparar_predicciones(predictions_df, de_modelo_version)
-    
-    # Estadísticas antes de insertar
-    log.info("\n Resumen de predicciones a guardar:")
-    log.info(f"   Total: {len(df_insert):,}")
-    
-    dist_nivel = df_insert['de_nivel_riesgo'].value_counts()
-    for nivel in ['critico', 'moderado', 'bajo', 'normal']:
-        count = dist_nivel.get(nivel, 0)
-        pct = count / len(df_insert) * 100
-        emoji = {'critico': 'ROJO', 'moderado': 'AMARILLO', 'bajo': 'VERDE', 'normal': 'GRIS'}.get(nivel)
-        log.info(f"   {emoji} {nivel.upper()}: {count:,} ({pct:.1f}%)")
-    
-    pred_positivas = df_insert['fl_pred_modelo'].sum()
-    log.info(f"   Predicciones positivas (fl_pred_modelo=1): {pred_positivas:,} ({pred_positivas/len(df_insert)*100:.1f}%)")
-    
-    # Conectar a BD
-    engine = get_db_engine(config)
-    table_name = 'bui_predicciones_hora_dia'
-    
+
+    if versionModelo is None:
+        versionModelo = config.get('model', {}).get('version', 'v1.0')
+
+    dfInsertar = _prepararDataFrame(dfPredicciones, versionModelo)
+
+    # RESUMEN PRE-INSERCIÓN
+    distNivel = dfInsertar['de_nivel_riesgo'].value_counts()
+    etiquetas = {'critico': 'CRÍTICO', 'moderado': 'MODERADO', 'bajo': 'BAJO', 'normal': 'NORMAL'}
+    for nivel, etiqueta in etiquetas.items():
+        n = distNivel.get(nivel, 0)
+        log.info(f"  {etiqueta}: {n:,} ({n / len(dfInsertar) * 100:.1f}%)")
+
+    nPositivas = dfInsertar['fl_pred_modelo'].sum()
+    log.info(f"  Predicciones positivas: {nPositivas:,} ({nPositivas / len(dfInsertar) * 100:.1f}%)")
+
+    engine = _crearEngine(config)
+    insertados  = 0
+    duplicados  = 0
+    sqlInsertar = text(f"""
+        INSERT IGNORE INTO {TABLA_DESTINO}
+        (id_maquina_dfos, id_linea, fe_ventana, nm_score,
+         de_nivel_riesgo, fl_pred_modelo, de_modelo_version)
+        VALUES
+        (:id_maquina_dfos, :id_linea, :fe_ventana, :nm_score,
+         :de_nivel_riesgo, :fl_pred_modelo, :de_modelo_version)
+    """)
+
     try:
-        # Verificar conexión
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
-        log.info(f" Conexión a BD establecida")
-        
-        # Insertar con manejo de duplicados
-        log.info(f"\n Insertando en '{table_name}'...")
-        
-        # Usar INSERT IGNORE para evitar errores por duplicados (UNIQUE en id_maquina_dfos + fe_ventana)
-        # Primero intentamos insertar todo
-        registros_insertados = 0
-        registros_duplicados = 0
-        
-        # Insertar en chunks para mejor control
-        chunk_size = 1000
-        total_chunks = (len(df_insert) + chunk_size - 1) // chunk_size
-        
-        for i in range(0, len(df_insert), chunk_size):
-            chunk = df_insert.iloc[i:i+chunk_size]
-            chunk_num = i // chunk_size + 1
-            
+        log.info("Conexión a BD verificada")
+
+        totalChunks = (len(dfInsertar) + CHUNK_INSERCION - 1) // CHUNK_INSERCION
+
+        for i in range(0, len(dfInsertar), CHUNK_INSERCION):
+            chunk     = dfInsertar.iloc[i:i + CHUNK_INSERCION]
+            numChunk  = i // CHUNK_INSERCION + 1
+
             try:
-                # Usar INSERT IGNORE mediante raw SQL para manejar duplicados
                 with engine.connect() as conn:
-                    for _, row in chunk.iterrows():
+                    for _, fila in chunk.iterrows():
                         try:
-                            insert_sql = text("""
-                                INSERT IGNORE INTO bui_predicciones_hora_dia
-                                (id_maquina_dfos, id_linea, fe_ventana, nm_score, 
-                                 de_nivel_riesgo, fl_pred_modelo, de_modelo_version)
-                                VALUES 
-                                (:id_maquina_dfos, :id_linea, :fe_ventana, :nm_score,
-                                 :de_nivel_riesgo, :fl_pred_modelo, :de_modelo_version)
-                            """)
-                            
-                            result = conn.execute(insert_sql, {
-                                'id_maquina_dfos': row['id_maquina_dfos'],
-                                'id_linea': int(row['id_linea']),
-                                'fe_ventana': row['fe_ventana'],
-                                'nm_score': float(row['nm_score']),
-                                'de_nivel_riesgo': row['de_nivel_riesgo'],
-                                'fl_pred_modelo': int(row['fl_pred_modelo']),
-                                'de_modelo_version': row['de_modelo_version']
+                            resultado = conn.execute(sqlInsertar, {
+                                'id_maquina_dfos':   fila['id_maquina_dfos'],
+                                'id_linea':          int(fila['id_linea']),
+                                'fe_ventana':        fila['fe_ventana'],
+                                'nm_score':          float(fila['nm_score']),
+                                'de_nivel_riesgo':   fila['de_nivel_riesgo'],
+                                'fl_pred_modelo':    int(fila['fl_pred_modelo']),
+                                'de_modelo_version': fila['de_modelo_version'],
                             })
-                            
-                            if result.rowcount > 0:
-                                registros_insertados += 1
+                            if resultado.rowcount > 0:
+                                insertados += 1
                             else:
-                                registros_duplicados += 1
-                                
+                                duplicados += 1
                         except Exception as e:
-                            log.warning(f"   Error insertando fila: {e}")
-                            registros_duplicados += 1
-                    
+                            log.warning(f"  Fila omitida: {e}")
+                            duplicados += 1
                     conn.commit()
-                
-                if chunk_num % 10 == 0 or chunk_num == total_chunks:
-                    log.info(f"   Chunk {chunk_num}/{total_chunks} procesado")
-                    
+
+                if numChunk % 10 == 0 or numChunk == totalChunks:
+                    log.info(f"  Chunk {numChunk}/{totalChunks} procesado")
+
             except Exception as e:
-                log.error(f"   Error en chunk {chunk_num}: {e}")
+                log.error(f"  Error en chunk {numChunk}: {e}")
                 raise
-        
-        log.info(f"\n Inserción completada:")
-        log.info(f"   Registros insertados: {registros_insertados:,}")
-        log.info(f"   Registros duplicados (ignorados): {registros_duplicados:,}")
-        
-        return registros_insertados
-        
+
+        log.info(f"\n  Insertados: {insertados:,} | Duplicados omitidos: {duplicados:,}")
+        return insertados
+
     except Exception as e:
-        log.error(f" Error guardando predicciones: {e}")
+        log.error(f"Error guardando predicciones: {e}")
         raise
-        
     finally:
         engine.dispose()
 
 
-def save_predictions_batch(predictions_df, config, de_modelo_version=None):
+def guardarPrediccionesBatch(dfPredicciones, config, versionModelo=None):
     """
-    Versión optimizada para inserción masiva usando pandas to_sql.
-    Más rápida pero no maneja duplicados individualmente.
-    
-    Args:
-        predictions_df: DataFrame con predicciones
-        config: dict con configuración
-        de_modelo_version: str con versión del modelo
-        
-    Returns:
-        int: número de registros procesados
+    Inserción masiva vía pandas to_sql. Más rápida pero sin control fino de duplicados.
+    Si detecta duplicados, hace fallback a guardarPrediccionesEnBd.
     """
-    log.info("=" * 80)
-    log.info(" GUARDANDO PREDICCIONES (MODO BATCH)")
-    log.info("=" * 80)
-    
-    if len(predictions_df) == 0:
-        log.warning(" DataFrame vacío, nada que guardar")
+    log.info("GUARDANDO PREDICCIONES EN BASE DE DATOS (MODO BATCH)")
+
+    if dfPredicciones.empty:
+        log.warning("DataFrame vacío, nada que guardar")
         return 0
-    
-    # Obtener versión del modelo
-    if de_modelo_version is None:
-        de_modelo_version = config.get('model', {}).get('version', 'v1.0')
-    
-    # Preparar datos
-    df_insert = preparar_predicciones(predictions_df, de_modelo_version)
-    
-    # Conectar a BD
-    engine = get_db_engine(config)
-    table_name = 'bui_predicciones_hora_dia'
-    
+
+    if versionModelo is None:
+        versionModelo = config.get('model', {}).get('version', 'v1.0')
+
+    dfInsertar = _prepararDataFrame(dfPredicciones, versionModelo)
+    engine = _crearEngine(config)
+
     try:
-        # Insertar usando pandas (más rápido)
-        log.info(f" Insertando {len(df_insert):,} registros en '{table_name}'...")
-        
-        df_insert.to_sql(
-            name=table_name,
-            con=engine,
-            if_exists='append',
-            index=False,
-            chunksize=1000,
-            method='multi'
+        log.info(f"Insertando {len(dfInsertar):,} registros en '{TABLA_DESTINO}'...")
+        dfInsertar.to_sql(
+            name=TABLA_DESTINO, con=engine,
+            if_exists='append', index=False,
+            chunksize=CHUNK_INSERCION, method='multi'
         )
-        
-        log.info(f" {len(df_insert):,} registros insertados")
-        return len(df_insert)
-        
+        log.info(f"{len(dfInsertar):,} registros insertados")
+        return len(dfInsertar)
+
     except Exception as e:
         if 'Duplicate entry' in str(e):
-            log.warning(f" Algunos registros ya existían (duplicados)")
-            # Fallback a inserción individual
-            log.info("   Reintentando con INSERT IGNORE...")
-            return save_predictions_to_db(predictions_df, config, de_modelo_version)
-        else:
-            log.error(f" Error guardando predicciones: {e}")
-            raise
-            
+            log.warning("Duplicados detectados — reintentando con INSERT IGNORE...")
+            return guardarPrediccionesEnBd(dfPredicciones, config, versionModelo)
+        log.error(f"Error guardando predicciones: {e}")
+        raise
     finally:
         engine.dispose()
 
 
-# ============================================================================
-# EJECUCIÓN STANDALONE
-# ============================================================================
-
 def main():
-    """
-    Ejecución standalone - lee predicciones de CSV temporal.
-    Útil para testing o re-procesamiento.
-    """
-    config = load_config()
-    logger = setup_logging(config)
-    
-    log.info("=" * 80)
-    log.info(" SAVE_PREDICTIONS.PY - MODO STANDALONE")
-    log.info("=" * 80)
-    
-    # Buscar archivo de predicciones más reciente
-    predictions_dir = Path(__file__).parent / 'outputs'
-    predictions_files = list(predictions_dir.glob('predictions_*.csv'))
-    
-    if not predictions_files:
-        log.error(" No se encontraron archivos de predicciones en outputs/")
+    # MODO STANDALONE - reprocesa el CSV de predicciones más reciente en outputs/
+    config = _cargarConfig()
+    setup_logging(config)
+
+    log.info("SAVE_PREDICTIONS — MODO STANDALONE")
+
+    dirOutputs = Path(__file__).parent / 'outputs'
+    archivos   = list(dirOutputs.glob('predictions_*.csv'))
+
+    if not archivos:
+        log.error("No se encontraron archivos predictions_*.csv en outputs/")
         return 1
-    
-    # Usar el más reciente
-    latest_file = max(predictions_files, key=lambda x: x.stat().st_mtime)
-    log.info(f" Cargando predicciones desde: {latest_file}")
-    
-    predictions_df = pd.read_csv(latest_file)
-    log.info(f"   Registros cargados: {len(predictions_df):,}")
-    
-    # Guardar en BD
+
+    archivoReciente = max(archivos, key=lambda x: x.stat().st_mtime)
+    log.info(f"Cargando: {archivoReciente}")
+
+    dfPred = pd.read_csv(archivoReciente)
+    log.info(f"{len(dfPred):,} registros cargados")
+
     try:
-        registros = save_predictions_to_db(predictions_df, config)
-        log.info(f"\n COMPLETADO: {registros:,} predicciones guardadas")
+        n = guardarPrediccionesEnBd(dfPred, config)
+        log.info(f"Completado: {n:,} predicciones guardadas")
         return 0
     except Exception as e:
-        log.error(f"\n ERROR: {e}")
+        log.error(f"Error: {e}")
         return 1
 
 
 if __name__ == "__main__":
-    exit_code = main()
-    sys.exit(exit_code)
+    sys.exit(main())
