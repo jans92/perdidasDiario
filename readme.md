@@ -101,7 +101,7 @@ Validación realizada sobre 5 fechas diferentes con alta incidencia de fallas:
                                 └────────────┬───────────┘
                                              ▼
                                 ┌─────────────────────────┐
-                                │  bui_predicciones_hora  │
+                                │  bui_predicciones_hora_dia  │
                                 │  (tabla de resultados)  │
                                 └─────────────────────────┘
 ```
@@ -372,7 +372,7 @@ Genera 63 features en 17 pasos:
 
 ### 4. Guardado (save_predictions.py)
 
-- Inserta predicciones en `bui_predicciones_hora`
+- Inserta predicciones en `bui_predicciones_hora_dia`
 - Calcula `fl_pred_modelo` (1 si score >= 0.31)
 - Maneja duplicados con INSERT IGNORE
 
@@ -387,7 +387,7 @@ Genera 63 features en 17 pasos:
 
 ## 🗃️ Tabla de Predicciones
 
-### Estructura: `bui_predicciones_hora`
+### Estructura: `bui_predicciones_hora_dia`
 
 | Campo | Tipo | Descripción |
 |-------|------|-------------|
@@ -422,7 +422,7 @@ Una falla se considera **grave** si cumple:
 
 ```sql
 -- Predicciones pendientes de actualizar
-SELECT * FROM bui_predicciones_hora 
+SELECT * FROM bui_predicciones_hora_dia 
 WHERE fl_target_real IS NULL 
   AND fe_ventana < NOW() - INTERVAL 24 HOUR;
 
@@ -431,7 +431,7 @@ SELECT
     fl_pred_modelo,
     fl_target_real,
     COUNT(*) as cantidad
-FROM bui_predicciones_hora
+FROM bui_predicciones_hora_dia
 WHERE fl_target_real IS NOT NULL
 GROUP BY fl_pred_modelo, fl_target_real;
 
@@ -441,7 +441,7 @@ SELECT
     SUM(CASE WHEN fl_pred_modelo = 1 AND fl_target_real = 0 THEN 1 ELSE 0 END) as FP,
     SUM(CASE WHEN fl_pred_modelo = 0 AND fl_target_real = 1 THEN 1 ELSE 0 END) as FN,
     SUM(CASE WHEN fl_pred_modelo = 0 AND fl_target_real = 0 THEN 1 ELSE 0 END) as TN
-FROM bui_predicciones_hora
+FROM bui_predicciones_hora_dia
 WHERE fl_target_real IS NOT NULL;
 ```
 
@@ -632,7 +632,7 @@ tail -f logs/predictions_$(date +%Y-%m-%d).log
 Verificar periódicamente:
 - Distribución de scores (debe mantenerse estable)
 - Ratio de alertas críticas (~5-8%)
-- Precision/Recall en fallas conocidas (consultar `bui_predicciones_hora`)
+- Precision/Recall en fallas conocidas (consultar `bui_predicciones_hora_dia`)
 
 ### Consulta de rendimiento histórico
 
@@ -643,7 +643,7 @@ SELECT
     SUM(fl_target_real) as fallas_reales,
     SUM(fl_acierto) as aciertos,
     ROUND(AVG(fl_acierto) * 100, 2) as accuracy_pct
-FROM bui_predicciones_hora
+FROM bui_predicciones_hora_dia
 WHERE fl_target_real IS NOT NULL
 GROUP BY DATE(fe_creado)
 ORDER BY fecha DESC
@@ -657,7 +657,7 @@ LIMIT 30;
 ### v1.1 (2025-12-06)
 - ✨ Nuevo: `save_predictions.py` para guardar predicciones en BD
 - ✨ Nuevo: `update_targets.py` para actualizar target_real
-- ✨ Nueva tabla `bui_predicciones_hora` para tracking de predicciones
+- ✨ Nueva tabla `bui_predicciones_hora_dia` para tracking de predicciones
 -  Fix: Soporte para fecha_referencia configurable (modo test)
 - 🔧 Fix: Extracción de 60 días para bui_pm_ewo (antes 7 días)
 - 📝 Documentación actualizada

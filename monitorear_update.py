@@ -28,7 +28,7 @@ def verificar_estado():
     # Targets pendientes (> 24h atrás sin calcular)
     q_pendientes = text("""
         SELECT COUNT(*) as pendientes
-        FROM bui_predicciones_hora
+        FROM bui_predicciones_hora_dia
         WHERE fe_ventana < DATE_SUB(NOW(), INTERVAL 24 HOUR)
           AND fl_target_real IS NULL
     """)
@@ -36,7 +36,7 @@ def verificar_estado():
     # Actualizados hoy
     q_hoy = text("""
         SELECT COUNT(*) as actualizados_hoy
-        FROM bui_predicciones_hora
+        FROM bui_predicciones_hora_dia
         WHERE DATE(fe_actualizado) = CURDATE()
     """)
     
@@ -44,7 +44,7 @@ def verificar_estado():
     q_accuracy = text("""
         SELECT 
             ROUND(SUM(fl_acierto) / COUNT(*) * 100, 2) as accuracy_7d
-        FROM bui_predicciones_hora
+        FROM bui_predicciones_hora_dia
         WHERE fl_target_real IS NOT NULL
           AND fe_ventana >= DATE_SUB(NOW(), INTERVAL 7 DAY)
     """)

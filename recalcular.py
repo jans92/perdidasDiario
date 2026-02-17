@@ -88,7 +88,7 @@ def obtener_todas_predicciones(engine_dev, dias_atras=None):
             fe_ventana,
             fl_pred_modelo,
             fl_target_real as target_anterior
-        FROM bui_predicciones_hora
+        FROM bui_predicciones_hora_dia
         WHERE fe_ventana < DATE_SUB(NOW(), INTERVAL 24 HOUR)
           {where_extra}
         ORDER BY fe_ventana ASC
@@ -240,7 +240,7 @@ def actualizar_prediccion_batch(engine_dev, updates_batch):
         ids = ",".join([str(u['id_prediccion']) for u in updates_batch])
         
         query = text(f"""
-            UPDATE bui_predicciones_hora
+            UPDATE bui_predicciones_hora_dia
             SET 
                 fl_target_real = CASE id_prediccion {case_target} END,
                 fl_acierto = CASE id_prediccion {case_acierto} END
@@ -394,7 +394,7 @@ def recalcular_targets_turbo(dias_atras=None):
                 SUM(CASE WHEN fl_target_real = 1 THEN 1 ELSE 0 END) as positivos,
                 SUM(fl_acierto) as aciertos,
                 ROUND(SUM(fl_acierto)/COUNT(*)*100, 2) as accuracy_pct
-            FROM bui_predicciones_hora
+            FROM bui_predicciones_hora_dia
             WHERE fl_target_real IS NOT NULL
         """)
         

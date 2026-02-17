@@ -148,7 +148,7 @@ def get_factories(_engine_dev):
             p.id_linea,
             l.id_fabrica,
             f.de_factory as nombre_fabrica
-        FROM bui_predicciones_hora p
+        FROM bui_predicciones_hora_dia p
         INNER JOIN bui_line l ON p.id_linea = l.id_linea
         INNER JOIN bui_factory f ON l.id_fabrica = f.id_factory
         ORDER BY f.de_factory
@@ -180,7 +180,7 @@ def get_metrics_summary(_engine_dev, id_fabrica=None):
             COUNT(DISTINCT id_maquina_dfos) as maquinas_monitoreadas,
             SUM(CASE WHEN fl_target_real IS NOT NULL THEN 1 ELSE 0 END) as targets_validados,
             SUM(CASE WHEN fl_acierto = 1 THEN 1 ELSE 0 END) as aciertos
-        FROM bui_predicciones_hora p
+        FROM bui_predicciones_hora_dia p
         WHERE 1=1
         {filtro_fabrica}
     """)
@@ -218,7 +218,7 @@ def get_daily_trend(_engine_dev, days=30, id_fabrica=None):
             COUNT(*) as predicciones,
             SUM(CASE WHEN fl_pred_modelo = 1 THEN 1 ELSE 0 END) as alertas,
             SUM(CASE WHEN fl_target_real = 1 THEN 1 ELSE 0 END) as breakdowns_reales
-        FROM bui_predicciones_hora p
+        FROM bui_predicciones_hora_dia p
         WHERE fe_ventana >= DATE_SUB(NOW(), INTERVAL :days DAY)
         {filtro_fabrica}
         GROUP BY DATE(fe_ventana)
@@ -249,7 +249,7 @@ def get_confusion_matrix(_engine_dev, id_fabrica=None):
             fl_pred_modelo,
             fl_target_real,
             COUNT(*) as cantidad
-        FROM bui_predicciones_hora p
+        FROM bui_predicciones_hora_dia p
         WHERE fl_target_real IS NOT NULL
         {filtro_fabrica}
         GROUP BY fl_pred_modelo, fl_target_real
@@ -294,7 +294,7 @@ def get_top_machines(_engine_dev, top_n=10, id_fabrica=None):
             SUM(CASE WHEN fl_pred_modelo = 1 THEN 1 ELSE 0 END) as alertas,
             AVG(nm_score) as score_promedio,
             SUM(CASE WHEN fl_target_real = 1 THEN 1 ELSE 0 END) as breakdowns_reales
-        FROM bui_predicciones_hora p
+        FROM bui_predicciones_hora_dia p
         WHERE fe_ventana >= DATE_SUB(NOW(), INTERVAL 30 DAY)
         {filtro_fabrica}
         GROUP BY p.id_maquina_dfos
@@ -326,7 +326,7 @@ def get_alert_distribution(_engine_dev, id_fabrica=None):
         SELECT
             de_nivel_riesgo,
             COUNT(*) as cantidad
-        FROM bui_predicciones_hora p
+        FROM bui_predicciones_hora_dia p
         WHERE fe_ventana >= DATE_SUB(NOW(), INTERVAL 30 DAY)
         {filtro_fabrica}
         GROUP BY de_nivel_riesgo

@@ -4,9 +4,9 @@
 -- ============================================================================
 
 -- Eliminar tabla si existe (solo para desarrollo)
--- DROP TABLE IF EXISTS bui_predicciones_hora;
+-- DROP TABLE IF EXISTS bui_predicciones_hora_dia;
 
-CREATE TABLE bui_predicciones_hora (
+CREATE TABLE bui_predicciones_hora_dia (
     -- Identificadores
     id_prediccion INT NOT NULL AUTO_INCREMENT,
     id_maquina_dfos VARCHAR(50) NOT NULL COMMENT 'ID de máquina en DFOS (formato: fabrica_linea-maquina)',
@@ -51,7 +51,7 @@ COMMENT='Predicciones horarias de averías por máquina - Sistema de Mantenimien
 
 -- 1. Predicciones pendientes de actualizar (ya pasaron 24h)
 /*
-SELECT * FROM bui_predicciones_hora 
+SELECT * FROM bui_predicciones_hora_dia 
 WHERE fl_target_real IS NULL 
   AND fe_ventana < NOW() - INTERVAL 24 HOUR
 LIMIT 10000;
@@ -63,7 +63,7 @@ SELECT
     fl_pred_modelo,
     fl_target_real,
     COUNT(*) as cantidad
-FROM bui_predicciones_hora
+FROM bui_predicciones_hora_dia
 WHERE fl_target_real IS NOT NULL
   AND DATE(fe_creado) = CURDATE() - INTERVAL 1 DAY
 GROUP BY fl_pred_modelo, fl_target_real;
@@ -78,14 +78,14 @@ SELECT
     SUM(CASE WHEN fl_pred_modelo = 0 AND fl_target_real = 1 THEN 1 ELSE 0 END) as FN,
     SUM(CASE WHEN fl_pred_modelo = 0 AND fl_target_real = 0 THEN 1 ELSE 0 END) as TN,
     SUM(fl_acierto) / COUNT(*) * 100 as accuracy_pct
-FROM bui_predicciones_hora
+FROM bui_predicciones_hora_dia
 WHERE fl_target_real IS NOT NULL;
 */
 
 -- 4. Alertas críticas actuales (pendientes)
 /*
 SELECT id_maquina_dfos, id_linea, fe_ventana, nm_score
-FROM bui_predicciones_hora
+FROM bui_predicciones_hora_dia
 WHERE de_nivel_riesgo = 'critico'
   AND fe_ventana >= NOW()
 ORDER BY nm_score DESC;

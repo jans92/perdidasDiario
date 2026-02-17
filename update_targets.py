@@ -5,9 +5,9 @@ Actualiza fl_target_real y fl_acierto para predicciones donde ya pasaron 24h.
 Se ejecuta periodicamente (ej: 1 vez al dia a las 23:00).
 
 ARQUITECTURA:
-- LEE predicciones de: DEV (bui_predicciones_hora)
+- LEE predicciones de: DEV (bui_predicciones_hora_dia)
 - LEE realidad de: PROD (bui_perdida, bui_pm_ewo)
-- ESCRIBE targets en: DEV (bui_predicciones_hora)
+- ESCRIBE targets en: DEV (bui_predicciones_hora_dia)
 
 Uso:
     python update_targets.py
@@ -116,9 +116,9 @@ def obtener_predicciones_pendientes(engine_dev, limit=BATCH_LIMIT):
             fe_ventana,
             nm_score,
             fl_pred_modelo
-        FROM bui_predicciones_hora
+        FROM bui_predicciones_hora_dia
         WHERE fl_target_real IS NULL
-          AND fe_ventana < NOW() - INTERVAL 24 HOUR
+          AND fe_ventana < NOW() - INTERVAL 5 HOUR
         ORDER BY fe_ventana ASC
         LIMIT :limit
     """)
@@ -239,7 +239,7 @@ def actualizar_prediccion(engine_dev, id_prediccion, target_real, pred_modelo):
     acierto = 1 if pred_modelo == target_real else 0
     
     query = text("""
-        UPDATE bui_predicciones_hora
+        UPDATE bui_predicciones_hora_dia
         SET fl_target_real = :target_real,
             fl_acierto = :acierto
         WHERE id_prediccion = :id_prediccion
@@ -356,7 +356,7 @@ def update_targets(config):
                     fl_pred_modelo,
                     fl_target_real,
                     COUNT(*) as cantidad
-                FROM bui_predicciones_hora
+                FROM bui_predicciones_hora_dia
                 WHERE fl_target_real IS NOT NULL
                   AND fe_ventana >= :fecha_min
                   AND fe_ventana <= :fecha_max

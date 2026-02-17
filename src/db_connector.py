@@ -234,7 +234,7 @@ class DatabaseConnector:
             if self.predictions_engine is None:
                 self.connect_predictions()
             
-            table_name = self.config.get('predictions', {}).get('table_name', 'bui_predicciones_hora')
+            table_name = self.config.get('predictions', {}).get('table_name', 'bui_predicciones_hora_dia')
             
             log.info(f" Guardando {len(predictions_df)} predicciones en '{table_name}'...")
             

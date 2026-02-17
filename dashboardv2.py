@@ -126,7 +126,7 @@ def get_timeline_data(_engine_prod, _engine_dev, id_linea, days=7):
             'Predicción (Alerta)' as Tipo,
             60 as Duracion,
             'Modelo IA' as Origen
-        FROM bui_predicciones_hora
+        FROM bui_predicciones_hora_dia
         WHERE id_linea = :id
           AND fl_pred_modelo = 1
           AND fe_ventana >= DATE_SUB(NOW(), INTERVAL :days DAY)
