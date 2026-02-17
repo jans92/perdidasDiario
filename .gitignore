@@ -17,3 +17,17 @@ venv/
 # Archivos temporales de test
 test_predictions_*.csv
 test_inference.log
+# Entornos virtuales
+venv/
+.venv/
+env/
+# Credenciales y Config
+.env
+config.yaml
+# Basura de Python y Logs
+__pycache__/
+*.pyc
+logs/
+# Datos temporales
+outputs/
+*.csv
